@@ -21,31 +21,28 @@ import { useWindowDimensions } from "react-native";
 
 const { width, height } = Dimensions.get("window");
 
-// Reszponzív segédfüggvények – max szélességgel korlátozva desktopra
+// Reszponzív segédfüggvények
 const wp = (percentage) => {
   const val = (width * percentage) / 100;
-  return Math.min(val, percentage * 8); // max ~800px széles tartalom (100% = 800px)
+  return Math.min(val, percentage * 8); // max ~800px
 };
 const hp = (percentage) => (height * percentage) / 100;
 const fs = (size) => {
   const base = width / 375;
   const scaled = size * base;
-  return width > 768 ? Math.min(scaled, size * 1.2) : scaled; // tablet/desktop ne legyen túl nagy a szöveg
+  return width > 768 ? Math.min(scaled, size * 1.2) : scaled;
 };
 
 export default function App() {
   const { width: screenWidth } = useWindowDimensions();
-  const isWideScreen = screenWidth > 768; // tablet vagy desktop
+  const isWideScreen = screenWidth > 768;
 
   const [screen, setScreen] = useState("login");
   const [isRegister, setIsRegister] = useState(false);
-
   const [currentUser, setCurrentUser] = useState(null);
-
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
   const [desc, setDesc] = useState("");
   const [image, setImage] = useState(null);
   const [location, setLocation] = useState(null);
@@ -53,6 +50,9 @@ export default function App() {
   const [selectedReport, setSelectedReport] = useState(null);
   const [statusModalVisible, setStatusModalVisible] = useState(false);
   const [filterStatus, setFilterStatus] = useState("Összes");
+
+  // ÚJ: Kulcs a térkép újratöltéséhez
+  const [mapReloadKey, setMapReloadKey] = useState(0);
 
   const API_URL = "http://192.168.56.1/cityguard-api/"; // <<< SAJÁT IP!!!
 
@@ -69,8 +69,6 @@ export default function App() {
       fetchReports();
     }
   }, [currentUser]);
-
-  // ... (minden fetch, handleLogin, handleRegister, handleLogout, pickImage, getLocation, submitReport, updateStatus függvény ugyanaz marad, mint az előző verzióban)
 
   const fetchReports = async () => {
     try {
@@ -155,6 +153,7 @@ export default function App() {
           setSelectedReport(null);
           setFilterStatus("Összes");
           setStatusModalVisible(false);
+          setMapReloadKey(0);
           Alert.alert("Siker", "Sikeresen kijelentkeztél!");
         },
       },
@@ -205,7 +204,13 @@ export default function App() {
         setDesc("");
         setImage(null);
         setLocation(null);
-        fetchReports();
+
+        // FONTOS: várjuk meg az új adatok betöltését
+        await fetchReports();
+
+        // KÉNYSZERÍTJÜK A TÉRKÉP ÚJRAÉPÍTÉSÉT
+        setMapReloadKey((prev) => prev + 1);
+
         setScreen("lista");
       } else {
         Alert.alert("Hiba", data.message);
@@ -234,7 +239,11 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         Alert.alert("Siker", "Státusz frissítve!");
-        fetchReports();
+        await fetchReports(); // frissítjük a listát és térképet
+
+        // KÉNYSZERÍTJÜK A TÉRKÉP ÚJRAÉPÍTÉSÉT
+        setMapReloadKey((prev) => prev + 1);
+
         setStatusModalVisible(false);
         setSelectedReport(null);
       } else {
@@ -245,53 +254,129 @@ export default function App() {
     }
   };
 
+  // Marker ikonok
   const getMarkerIcon = (status) => {
-    const color = (statusColors[status || "Új"] || "#FF0000").slice(1);
-    return `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-${color.toLowerCase()}.png`;
+    let color = "red"; // Új
+    if (status === "Folyamatban") color = "blue";
+    if (status === "Megoldva") color = "green";
+    if (status === "Elutasítva") color = "grey";
+
+    return `https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-${color}.png`;
   };
 
   const renderMapHTML = () => {
-    const markers = reports
-      .map((r) => {
-        const desc = r.description?.replace(/"/g, '\\"') || "Nincs leírás";
-        const img = r.image_path
-          ? `<img src="${API_URL}${r.image_path}" style="max-width:100%;border-radius:8px;margin-top:8px;">`
-          : "";
-        const iconUrl = getMarkerIcon(r.status);
-        return `
-          var icon = L.icon({iconUrl: '${iconUrl}', shadowUrl: 'https://unpkg.com/leaflet/dist/images/marker-shadow.png', iconSize: [25,41], iconAnchor: [12,41]});
-          L.marker([${r.latitude},${r.longitude}], {icon: icon}).addTo(map)
-           .bindPopup("<b>${desc}</b><br>Státusz: <b>${
-          r.status || "Új"
-        }</b><br>${img}");
+    // Csak érvényes koordinátájú reportok
+    const validReports = reports.filter(
+      (r) =>
+        r.latitude &&
+        r.longitude &&
+        !isNaN(parseFloat(r.latitude)) &&
+        !isNaN(parseFloat(r.longitude))
+    );
+
+    let markersScript = "";
+    let boundsScript = "";
+
+    if (validReports.length > 0) {
+      // Vannak érvényes markerek
+      markersScript = validReports
+        .map((r) => {
+          const desc = (r.description || "Nincs leírás").replace(/"/g, '\\"');
+          const img = r.image_path
+            ? `<img src="${API_URL}${r.image_path}" style="max-width:100%;border-radius:8px;margin-top:8px;">`
+            : "";
+          const iconUrl = getMarkerIcon(r.status);
+
+          return `
+          L.marker([${parseFloat(r.latitude)}, ${parseFloat(r.longitude)}], {
+            icon: L.icon({
+              iconUrl: '${iconUrl}',
+              shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+              iconSize: [25, 41],
+              iconAnchor: [12, 41],
+              popupAnchor: [1, -34],
+              shadowSize: [41, 41]
+            })
+          })
+          .addTo(map)
+          .bindPopup("<b>${desc}</b><br>Státusz: <b>${
+            r.status || "Új"
+          }</b><br>${img}");
         `;
-      })
-      .join("\n");
+        })
+        .join("\n");
+
+      // Automatikus zoom a markerekre
+      boundsScript = `
+      var group = new L.featureGroup([${validReports
+        .map(
+          (r) =>
+            `L.marker([${parseFloat(r.latitude)}, ${parseFloat(r.longitude)}])`
+        )
+        .join(",")}]);
+      map.fitBounds(group.getBounds().pad(0.3));
+    `;
+    } else {
+      // Nincs érvényes marker (vagy nincs report, vagy nincs érvényes koordináta)
+      markersScript = `
+      L.marker([47.4979, 19.0402]).addTo(map)
+       .bindPopup("<b>${
+         reports.length === 0
+           ? "Még nincsenek bejelentések"
+           : "Nincs megjeleníthető bejelentés érvényes hellyel"
+       }</b>")
+       .openPopup();
+    `;
+    }
 
     return `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-          <style>
-            html,body,#map{height:100%;margin:0;padding:0;overflow:hidden;}
-            .leaflet-popup-content { max-height: 60vh; overflow-y: auto; }
-            .leaflet-popup-content img { max-width: 100%; height: auto; }
-          </style>
-        </head>
-        <body>
-          <div id="map"></div>
-          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-          <script>
-            var map = L.map('map', {zoomControl: true}).setView([47.4979, 19.0402], 13);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-            ${markers}
-            setTimeout(() => map.invalidateSize(), 500);
-          </script>
-        </body>
-      </html>
-    `;
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <style>
+          html,body,#map{height:100%;margin:0;padding:0;overflow:hidden;}
+          .leaflet-popup-content { max-height: 60vh; overflow-y: auto; }
+          .leaflet-popup-content img { max-width: 100%; height: auto; }
+        </style>
+      </head>
+      <body>
+        <div id="map"></div>
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <script>
+          var map = L.map('map', {zoomControl: true}).setView([47.4979, 19.0402], 13);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+          }).addTo(map);
+
+          ${markersScript}
+
+          ${boundsScript}
+
+          // FORCE RESIZE - FONTOS!
+          window.onload = function() {
+            setTimeout(function() {
+              map.invalidateSize(true);
+              map.setView(map.getCenter(), map.getZoom());
+            }, 100);
+            
+            // Extra resize, ha kell
+            setTimeout(function() {
+              map.invalidateSize(true);
+            }, 500);
+          };
+          
+          // Window resize eseménykezelő is
+          window.addEventListener('resize', function() {
+            setTimeout(function() {
+              map.invalidateSize(true);
+            }, 300);
+          });
+        </script>
+      </body>
+    </html>
+  `;
   };
 
   const filteredReports =
@@ -385,7 +470,7 @@ export default function App() {
         </View>
       </View>
 
-      {/* FŐ TARTALOM – központosítva wide screen-en */}
+      {/* FŐ TARTALOM */}
       <View style={isWideScreen ? styles.wideContentWrapper : { flex: 1 }}>
         {/* BEJELENTÉS */}
         {screen === "bejelentés" && (
@@ -438,7 +523,7 @@ export default function App() {
                   style={[
                     styles.filterButton,
                     filterStatus === s && {
-                      backgroundColor: statusColors[s] || "#666",
+                      backgroundColor: statusColors[s] || "#90AB8B",
                     },
                   ]}
                   onPress={() => setFilterStatus(s)}
@@ -504,14 +589,50 @@ export default function App() {
         {/* TÉRKÉP */}
         {screen === "térkép" && (
           <View style={{ flex: 1 }}>
+            {/* Frissítés gomb (opcionális, debug célokra) */}
+            {__DEV__ && (
+              <View style={styles.mapHeader}>
+                <TouchableOpacity
+                  style={styles.refreshButton}
+                  onPress={() => setMapReloadKey((prev) => prev + 1)}
+                >
+                  <Text style={styles.refreshButtonText}>
+                    🔄 Térkép frissítése
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* MINDIG MEGJELENÍTJÜK A TÉRKÉPET! */}
             {Platform.OS === "web" ? (
               <iframe
                 srcDoc={renderMapHTML()}
-                style={{ width: "100%", height: "100%", border: "none" }}
+                style={{
+                  width: "100%",
+                  height: __DEV__ ? "90%" : "100%",
+                  border: "none",
+                }}
                 title="CityGuard Térkép"
+                key={`iframe-${mapReloadKey}`} // Újratöltés kényszerítése
               />
             ) : (
-              <WebView source={{ html: renderMapHTML() }} style={{ flex: 1 }} />
+              <WebView
+                key={`webview-${mapReloadKey}`} // Mindig más key, így új komponens lesz
+                source={{ html: renderMapHTML() }}
+                style={{ flex: 1 }}
+                javaScriptEnabled={true}
+                domStorageEnabled={true}
+                originWhitelist={["*"]}
+                allowUniversalAccessFromFileURLs={true}
+                mixedContentMode="compatibility"
+                onLoad={() =>
+                  console.log("Térkép betöltve, key:", mapReloadKey)
+                }
+                onError={(syntheticEvent) => {
+                  const { nativeEvent } = syntheticEvent;
+                  console.warn("WebView error: ", nativeEvent);
+                }}
+              />
             )}
           </View>
         )}
@@ -560,7 +681,7 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F5F7FA" },
+  container: { flex: 1, backgroundColor: "#EBF4DD" },
   wideContentWrapper: {
     flex: 1,
     maxWidth: 800,
@@ -573,7 +694,7 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     textAlign: "center",
     marginBottom: hp(5),
-    color: "#2E7D32",
+    color: "#5A7863",
   },
   input: {
     backgroundColor: "#fff",
@@ -581,7 +702,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginVertical: hp(1),
     borderWidth: 1,
-    borderColor: "#DDD",
+    borderColor: "#90AB8B",
     fontSize: fs(16),
   },
   multilineInput: {
@@ -590,20 +711,20 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: hp(2),
     borderWidth: 1,
-    borderColor: "#DDD",
+    borderColor: "#90AB8B",
     fontSize: fs(16),
     minHeight: hp(15),
     textAlignVertical: "top",
   },
   primaryButton: {
-    backgroundColor: "#2E7D32",
+    backgroundColor: "#5A7863",
     padding: wp(4),
     borderRadius: 12,
     alignItems: "center",
     marginVertical: hp(2),
   },
   secondaryButton: {
-    backgroundColor: "#4A90E2",
+    backgroundColor: "#90AB8B",
     padding: wp(4),
     borderRadius: 12,
     alignItems: "center",
@@ -613,7 +734,7 @@ const styles = StyleSheet.create({
   linkText: {
     textAlign: "center",
     marginTop: hp(3),
-    color: "#2E7D32",
+    color: "#5A7863",
     fontWeight: "bold",
     fontSize: fs(15),
   },
@@ -621,7 +742,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: "#2E7D32",
+    backgroundColor: "#5A7863",
     paddingHorizontal: wp(4),
     paddingVertical: hp(1.5),
   },
@@ -635,20 +756,20 @@ const styles = StyleSheet.create({
   navButtonActive: { backgroundColor: "rgba(255,255,255,0.3)" },
   navButtonText: { color: "#fff", fontWeight: "bold", fontSize: fs(15) },
   adminBadge: {
-    backgroundColor: "#D32F2F",
+    backgroundColor: "#3B4953",
     paddingHorizontal: wp(3),
     paddingVertical: hp(0.8),
     borderRadius: 20,
     marginRight: wp(3),
   },
-  adminBadgeText: { color: "#fff", fontWeight: "bold", fontSize: fs(12) },
+  adminBadgeText: { color: "#EBF4DD", fontWeight: "bold", fontSize: fs(12) },
   logoutButton: {
-    backgroundColor: "#D32F2F",
+    backgroundColor: "#3B4953",
     paddingHorizontal: wp(5),
     paddingVertical: hp(1.5),
     borderRadius: 12,
   },
-  logoutButtonText: { color: "#fff", fontWeight: "bold", fontSize: fs(15) },
+  logoutButtonText: { color: "#EBF4DD", fontWeight: "bold", fontSize: fs(15) },
   contentContainer: { flex: 1, padding: wp(5) },
   previewImage: {
     width: "100%",
@@ -658,7 +779,7 @@ const styles = StyleSheet.create({
   },
   successText: {
     marginVertical: hp(2),
-    color: "#4CAF50",
+    color: "#5A7863",
     fontSize: fs(16),
     textAlign: "center",
   },
@@ -670,7 +791,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
   },
   filterButton: {
-    backgroundColor: "#777",
+    backgroundColor: "#90AB8B",
     paddingHorizontal: wp(4),
     paddingVertical: hp(1),
     borderRadius: 30,
@@ -683,11 +804,11 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginVertical: hp(1),
     elevation: 6,
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
+    shadowColor: "#3B4953",
+    shadowOpacity: 0.15,
     shadowRadius: 8,
   },
-  cardTitle: { fontSize: fs(17), fontWeight: "bold", color: "#333" },
+  cardTitle: { fontSize: fs(17), fontWeight: "bold", color: "#3B4953" },
   cardStatus: { fontSize: fs(15), fontWeight: "bold", marginTop: hp(0.5) },
   cardImage: {
     width: "100%",
@@ -697,7 +818,7 @@ const styles = StyleSheet.create({
   },
   adminHint: {
     fontSize: fs(12),
-    color: "#0066cc",
+    color: "#5A7863",
     marginTop: hp(1),
     fontStyle: "italic",
     textAlign: "right",
@@ -705,7 +826,7 @@ const styles = StyleSheet.create({
   emptyText: {
     textAlign: "center",
     padding: hp(5),
-    color: "#666",
+    color: "#5A7863",
     fontSize: fs(16),
   },
   modalOverlay: {
@@ -725,11 +846,11 @@ const styles = StyleSheet.create({
     fontSize: fs(22),
     fontWeight: "bold",
     marginBottom: hp(2),
-    color: "#333",
+    color: "#3B4953",
   },
   modalDesc: {
     fontSize: fs(15),
-    color: "#555",
+    color: "#5A7863",
     marginVertical: hp(2),
     textAlign: "center",
   },
@@ -742,5 +863,22 @@ const styles = StyleSheet.create({
   },
   statusOptionText: { color: "#fff", fontWeight: "bold", fontSize: fs(16) },
   cancelButton: { marginTop: hp(3) },
-  cancelText: { color: "#666", fontWeight: "bold", fontSize: fs(16) },
+  cancelText: { color: "#3B4953", fontWeight: "bold", fontSize: fs(16) },
+  // Új stílusok a térképhez
+  mapHeader: {
+    padding: 10,
+    backgroundColor: "#fff",
+    alignItems: "center",
+  },
+  refreshButton: {
+    backgroundColor: "#5A7863",
+    padding: 10,
+    borderRadius: 8,
+    paddingHorizontal: 20,
+  },
+  refreshButtonText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 14,
+  },
 });
